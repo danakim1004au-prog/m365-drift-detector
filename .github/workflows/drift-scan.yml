@@ -1,0 +1,51 @@
+name: Scheduled drift scan
+
+on:
+  schedule:
+    - cron: '0 19 * * *'   # 05:00 AEST daily
+  workflow_dispatch:
+
+jobs:
+  drift-scan:
+    runs-on: windows-latest   # cert-store auth (CurrentUser\My) needs Windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Graph modules
+        shell: pwsh
+        run: Install-Module Microsoft.Graph.Authentication -Force -Scope CurrentUser
+
+      - name: Import auth certificate
+        shell: pwsh
+        env:
+          AUTH_CERT_PFX_B64: ${{ secrets.AUTH_CERT_PFX_B64 }}
+          AUTH_CERT_PASSWORD: ${{ secrets.AUTH_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'auth.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:AUTH_CERT_PFX_B64))
+          Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My `
+            -Password (ConvertTo-SecureString $env:AUTH_CERT_PASSWORD -AsPlainText -Force)
+          Remove-Item $pfx
+
+      - name: Materialise tenant config
+        shell: pwsh
+        env:
+          TENANTS_JSON: ${{ secrets.TENANTS_JSON }}
+        run: Set-Content -Path config/tenants.json -Value $env:TENANTS_JSON
+
+      - name: Run drift scan
+        id: scan
+        shell: pwsh
+        continue-on-error: true   # still upload the report when drift fails the step
+        run: ./scripts/Invoke-DriftScan.ps1 -ConfigPath config/tenants.json -OutputPath ./reports
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-report
+          path: reports/
+
+      - name: Fail on critical drift
+        if: steps.scan.outcome == 'failure'
+        shell: pwsh
+        run: throw 'Critical drift or scan errors found — see drift-report artifact.'

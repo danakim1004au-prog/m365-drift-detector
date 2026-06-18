@@ -1,0 +1,38 @@
+{
+  "tenantName": "Contoso",
+  "capturedAt": "2026-06-11T09:00:00",
+  "conditionalAccess": [
+    {
+      "DisplayName": "CA001 - Require MFA for all users",
+      "State": "enabled",
+      "IncludedUsers": ["All"],
+      "ExcludedUsers": ["break-glass@contoso.onmicrosoft.com"],
+      "ExcludedGroups": [],
+      "GrantControls": ["mfa"]
+    },
+    {
+      "DisplayName": "CA002 - Block legacy authentication",
+      "State": "enabled",
+      "IncludedUsers": ["All"],
+      "ExcludedUsers": [],
+      "ExcludedGroups": [],
+      "GrantControls": ["block"]
+    },
+    {
+      "DisplayName": "CA003 - Require compliant device for admins",
+      "State": "enabled",
+      "IncludedUsers": [],
+      "ExcludedUsers": [],
+      "ExcludedGroups": [],
+      "GrantControls": ["compliantDevice"]
+    }
+  ],
+  "sharing": {
+    "AllowInvitesFrom": "adminsAndGuestInviters",
+    "GuestUserRole": "2af84b1e-32c8-42b7-82bc-daa82404023b",
+    "SharePointSharingCapability": "existingExternalUserSharingOnly",
+    "SharingAllowedDomainList": ["partner.com.au"]
+  },
+  "mfaFloorPercent": 95,
+  "secureScoreFloorPercent": 65
+}

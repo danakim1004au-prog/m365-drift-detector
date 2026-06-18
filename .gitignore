@@ -1,0 +1,12 @@
+# Real tenant config & captured baselines may identify customers
+config/tenants.json
+
+# Generated output
+reports/
+
+# Certificates — never commit key material
+*.pfx
+*.cer
+*.pem
+
+.DS_Store
