@@ -2,31 +2,15 @@
 
 Multi-tenant security-configuration drift detection for MSPs. Each customer tenant gets a JSON **baseline** describing how its security posture *should* look (Conditional Access policies, MFA registration coverage, external sharing, Secure Score floor). The scanner reads the *actual* state via Microsoft Graph (certificate-based app-only auth, fully unattended), diffs it against the baseline, and emits a severity-ranked HTML drift report plus Power BI-ready CSVs.
 
-> Sibling project: [`m365-tenant-reporter`](../m365-tenant-reporter) answers "what does each tenant look like this week?" — this project answers the harder MSP governance question: "**which tenant silently changed away from the agreed standard, and where?**"
+> Sibling project: [`m365-tenant-reporter`](../m365-tenant-reporter) answers "what does each tenant look like this week?", this project answers the harder MSP governance question: "**which tenant silently changed away from the agreed standard, and where?**"
 
 ## Purpose
 
-At an MSP, the dangerous incidents are rarely "a setting was always wrong" — they're "a setting *was* right until someone changed it on a Tuesday." A customer admin disables a CA policy to unblock a VIP, a trial license lapses and MFA enforcement quietly degrades, external sharing gets opened for one project and never closed. Drift detection turns those silent regressions into a scheduled, auditable report.
+At an MSP, the dangerous incidents are rarely "a setting was always wrong", they're "a setting *was* right until someone changed it on a Tuesday." A customer admin disables a CA policy to unblock a VIP, a trial license lapses and MFA enforcement quietly degrades, external sharing gets opened for one project and never closed. Drift detection turns those silent regressions into a scheduled, auditable report.
 
 ## Architecture
 
-![Architecture](docs/m365-drift-detector-Architecture.png)
-
-```
-config/tenants.json (gitignored)          baselines/<tenant>.baseline.json
-        │                                          │
-        └──▶ Invoke-DriftScan.ps1 ── per tenant ──┤
-               │   Connect-MgGraph (cert app-only) │
-               │   ├─ Get-DriftCaPolicySnapshot    │  conditionalAccess/policies
-               │   ├─ Get-DriftMfaCoverage         │  authMethods registration report
-               │   ├─ Get-DriftSharingSettings     │  authorizationPolicy + admin/sharepoint/settings
-               │   └─ Get-DriftSecureScore         │  security/secureScores (latest)
-               │                                   ▼
-               └────────────▶ Compare-DriftBaseline (expected vs actual, per-setting severity)
-                                   │
-                                   ├─▶ Export-DriftHtmlReport ▶ reports/drift-<stamp>.html
-                                   └─▶ drift-<stamp>.csv (Tenant/Area/Setting/Expected/Actual/Severity → Power BI)
-```
+<img width="1536" height="1024" alt="m365-drift-detector-Architecture" src="https://github.com/user-attachments/assets/d8b919b3-33c1-4565-b17a-df1586202ef7" />
 
 Scheduling: GitHub Actions workflow ([.github/workflows/drift-scan.yml](.github/workflows/drift-scan.yml)) or Azure Automation runbook ([automation/Runbook-DriftScan.ps1](automation/Runbook-DriftScan.ps1)).
 
