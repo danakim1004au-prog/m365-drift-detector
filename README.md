@@ -10,6 +10,8 @@ At an MSP, the dangerous incidents are rarely "a setting was always wrong" — t
 
 ## Architecture
 
+![Architecture](docs/m365-drift-detector-Architecture.png)
+
 ```
 config/tenants.json (gitignored)          baselines/<tenant>.baseline.json
         │                                          │
@@ -90,6 +92,26 @@ New-DriftBaseline -TenantConfig (Get-Content config/tenants.json | ConvertFrom-J
 | Secure Score | Current percentage below baseline floor minus tolerance | Warning |
 
 Severity drives both report styling and the exit code (`2` = critical drift found) so CI can gate on it.
+
+## Evidence (live run)
+
+Captured end-to-end against a Microsoft 365 tenant with certificate app-only Graph auth.
+
+**1. Capture the baseline.** A known-good tenant state is snapshotted to a reviewed JSON file — this is the "agreed standard" every later scan diffs against (baseline-as-code).
+
+![Baseline capture](docs/Terminal-baseline-capture.png)
+
+**2. Clean scan — 0 drifted.** With the live tenant matching the baseline, the scan reports zero drift and exits `0`.
+
+![Clean scan](docs/Terminal-clean-scan.png)
+
+**3. Drift detected — exit code 2.** After external sharing and guest-invite settings were loosened in the portal, the next scan flags the regression and exits `2`, the signal CI uses to fail a pipeline.
+
+![Drift detected](docs/Terminal-drift-detected.png)
+
+**4. Severity-ranked HTML report.** The same run renders a report with summary cards and red/amber rows — the artifact an MSP account manager actually reads.
+
+![HTML drift report](docs/HTML-report.png)
 
 ## Design decisions
 
