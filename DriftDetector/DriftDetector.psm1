@@ -364,7 +364,7 @@ function Export-DriftHtmlReport {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][object[]]$Findings,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Findings,
         [Parameter(Mandatory)][string]$OutFile
     )
 
