@@ -5,6 +5,28 @@ Set-StrictMode -Version Latest
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+function Get-DriftObjectValue {
+    param(
+        [AllowNull()][object]$InputObject,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    if ($null -eq $InputObject) {
+        return $null
+    }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        return $InputObject[$Name]
+    }
+
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($property) {
+        return $property.Value
+    }
+
+    return $null
+}
+
 function New-DriftFinding {
     param(
         [string]$Tenant,
@@ -43,18 +65,31 @@ function Get-DriftCaPolicySnapshot {
     [CmdletBinding()]
     param()
 
-    $policies = Invoke-MgGraphRequest -Method GET `
-        -Uri 'https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies' |
-        Select-Object -ExpandProperty value
+    try {
+        $response = Invoke-MgGraphRequest -Method GET `
+            -Uri 'https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies' -ErrorAction Stop
+        $policies = @(Get-DriftObjectValue $response 'value')
+    }
+    catch {
+        # Free tenants can't host CA policies (requires Entra ID P1); return none.
+        if ($_ -match '403|premium|NonPremium') {
+            Write-Warning "Conditional Access requires Entra ID P1 — no policies captured (Free tenant)"
+            return @()
+        }
+        throw
+    }
 
     foreach ($p in $policies) {
+        $conditions = Get-DriftObjectValue $p 'conditions'
+        $users = Get-DriftObjectValue $conditions 'users'
+        $grant = Get-DriftObjectValue $p 'grantControls'
         [pscustomobject]@{
-            DisplayName    = $p.displayName
-            State          = $p.state                       # enabled | disabled | enabledForReportingButNotEnforced
-            IncludedUsers  = @($p.conditions.users.includeUsers)
-            ExcludedUsers  = @($p.conditions.users.excludeUsers)
-            ExcludedGroups = @($p.conditions.users.excludeGroups)
-            GrantControls  = @($p.grantControls.builtInControls)
+            DisplayName    = Get-DriftObjectValue $p 'displayName'
+            State          = Get-DriftObjectValue $p 'state' # enabled | disabled | enabledForReportingButNotEnforced
+            IncludedUsers  = @(Get-DriftObjectValue $users 'includeUsers')
+            ExcludedUsers  = @(Get-DriftObjectValue $users 'excludeUsers')
+            ExcludedGroups = @(Get-DriftObjectValue $users 'excludeGroups')
+            GrantControls  = @(Get-DriftObjectValue $grant 'builtInControls')
         }
     }
 }
@@ -72,19 +107,35 @@ function Get-DriftMfaCoverage {
 
     $uri = "https://graph.microsoft.com/v1.0/reports/authenticationMethods/userRegistrationDetails?`$top=999"
     $users = @()
-    do {
-        $page = Invoke-MgGraphRequest -Method GET -Uri $uri
-        $users += $page.value
-        $uri = $page.'@odata.nextLink'
-    } while ($uri)
+    try {
+        do {
+            $page = Invoke-MgGraphRequest -Method GET -Uri $uri -ErrorAction Stop
+            $users += @(Get-DriftObjectValue $page 'value')
+            $uri = Get-DriftObjectValue $page '@odata.nextLink'
+        } while ($uri)
+    }
+    catch {
+        # 403: tenant lacks Azure AD Premium P1/P2 for this report API
+        if ($_ -match '403|NonPremiumTenant|premium') {
+            Write-Warning "MFA registration report requires Azure AD Premium P1/P2 — returning 0% (assign E5/P1 license to enable)"
+            return [pscustomobject]@{
+                MemberUserCount      = -1
+                MfaRegisteredCount   = -1
+                MfaRegisteredPercent = -1
+                LicenseError         = $true
+            }
+        }
+        throw
+    }
 
-    $members = @($users | Where-Object { $_.userType -eq 'member' })
-    $registered = @($members | Where-Object { $_.isMfaRegistered })
+    $members = @($users | Where-Object { (Get-DriftObjectValue $_ 'userType') -eq 'member' })
+    $registered = @($members | Where-Object { Get-DriftObjectValue $_ 'isMfaRegistered' })
 
     [pscustomobject]@{
         MemberUserCount      = $members.Count
         MfaRegisteredCount   = $registered.Count
         MfaRegisteredPercent = if ($members.Count) { [math]::Round(100 * $registered.Count / $members.Count, 1) } else { 0 }
+        LicenseError         = $false
     }
 }
 
@@ -100,16 +151,29 @@ function Get-DriftSharingSettings {
     [CmdletBinding()]
     param()
 
+    # Entra guest-invite policy is available on every tenant tier.
     $authz = Invoke-MgGraphRequest -Method GET `
         -Uri 'https://graph.microsoft.com/v1.0/policies/authorizationPolicy'
-    $spo = Invoke-MgGraphRequest -Method GET `
-        -Uri 'https://graph.microsoft.com/v1.0/admin/sharepoint/settings'
+
+    # SharePoint settings need a provisioned SharePoint Online (M365 licence);
+    # a bare Entra-only tenant returns 404/403 here.
+    $spoCapability = 'unavailable'
+    $spoDomains = @()
+    try {
+        $spo = Invoke-MgGraphRequest -Method GET `
+            -Uri 'https://graph.microsoft.com/v1.0/admin/sharepoint/settings' -ErrorAction Stop
+        $spoCapability = Get-DriftObjectValue $spo 'sharingCapability'
+        $spoDomains = @(Get-DriftObjectValue $spo 'sharingAllowedDomainList')
+    }
+    catch {
+        Write-Warning "SharePoint sharing settings unavailable (no SharePoint Online provisioned on this tenant)"
+    }
 
     [pscustomobject]@{
-        AllowInvitesFrom          = $authz.allowInvitesFrom
-        GuestUserRole             = $authz.guestUserRoleId
-        SharePointSharingCapability = $spo.sharingCapability
-        SharingAllowedDomainList  = @($spo.sharingAllowedDomainList)
+        AllowInvitesFrom          = Get-DriftObjectValue $authz 'allowInvitesFrom'
+        GuestUserRole             = Get-DriftObjectValue $authz 'guestUserRoleId'
+        SharePointSharingCapability = $spoCapability
+        SharingAllowedDomainList  = $spoDomains
     }
 }
 
@@ -123,14 +187,32 @@ function Get-DriftSecureScore {
     [CmdletBinding()]
     param()
 
-    $score = (Invoke-MgGraphRequest -Method GET `
-        -Uri "https://graph.microsoft.com/v1.0/security/secureScores?`$top=1").value | Select-Object -First 1
+    # Secure Score is generated once a tenant has M365 security workloads;
+    # a brand-new Entra-only tenant has no score document yet.
+    try {
+        $resp = Invoke-MgGraphRequest -Method GET `
+            -Uri "https://graph.microsoft.com/v1.0/security/secureScores?`$top=1" -ErrorAction Stop
+        $score = @(Get-DriftObjectValue $resp 'value') | Select-Object -First 1
+    }
+    catch {
+        Write-Warning "Secure Score unavailable on this tenant"
+        $score = $null
+    }
 
+    if (-not $score) {
+        return [pscustomobject]@{
+            CurrentScore = -1; MaxScore = -1; Percent = -1; CreatedDate = $null; Unavailable = $true
+        }
+    }
+
+    $current = Get-DriftObjectValue $score 'currentScore'
+    $max     = Get-DriftObjectValue $score 'maxScore'
     [pscustomobject]@{
-        CurrentScore = $score.currentScore
-        MaxScore     = $score.maxScore
-        Percent      = if ($score.maxScore) { [math]::Round(100 * $score.currentScore / $score.maxScore, 1) } else { 0 }
-        CreatedDate  = $score.createdDateTime
+        CurrentScore = $current
+        MaxScore     = $max
+        Percent      = if ($max) { [math]::Round(100 * $current / $max, 1) } else { 0 }
+        CreatedDate  = Get-DriftObjectValue $score 'createdDateTime'
+        Unavailable  = $false
     }
 }
 
@@ -159,13 +241,23 @@ function New-DriftBaseline {
     $mfa = Get-DriftMfaCoverage
     $score = Get-DriftSecureScore
 
+    $mfaFloor = if ($mfa.LicenseError) {
+        Write-Warning "MFA floor set to 0 (Premium license required — update baseline after assigning E5/P1)"
+        0
+    } else { [math]::Floor($mfa.MfaRegisteredPercent) }
+
+    $scoreFloor = if ($score.Unavailable) {
+        Write-Warning "Secure Score floor set to 0 (no score on this tenant yet)"
+        0
+    } else { [math]::Floor($score.Percent) }
+
     $baseline = [ordered]@{
         tenantName        = $TenantName
         capturedAt        = (Get-Date).ToString('s')
         conditionalAccess = @(Get-DriftCaPolicySnapshot)
         sharing           = Get-DriftSharingSettings
-        mfaFloorPercent   = [math]::Floor($mfa.MfaRegisteredPercent)
-        secureScoreFloorPercent = [math]::Floor($score.Percent)
+        mfaFloorPercent   = $mfaFloor
+        secureScoreFloorPercent = $scoreFloor
     }
 
     $baseline | ConvertTo-Json -Depth 8 | Set-Content -Path $OutFile -Encoding utf8
@@ -195,7 +287,11 @@ function Compare-DriftBaseline {
 
     # --- Conditional Access ------------------------------------------------
     $livePolicies = @(Get-DriftCaPolicySnapshot)
-    foreach ($expected in $baseline.conditionalAccess) {
+    # Collect baseline policy names up front: projecting .DisplayName over an
+    # empty array throws under StrictMode, so guard with @(...).
+    $baselinePolicies = @($baseline.conditionalAccess)
+    $baselineNames = @($baselinePolicies | ForEach-Object { $_.DisplayName })
+    foreach ($expected in $baselinePolicies) {
         $actual = $livePolicies | Where-Object DisplayName -eq $expected.DisplayName
         if (-not $actual) {
             $findings.Add((New-DriftFinding $Tenant 'ConditionalAccess' "$($expected.DisplayName) / exists" 'present' 'MISSING' 'Critical'))
@@ -210,7 +306,7 @@ function Compare-DriftBaseline {
         $findings.Add((New-DriftFinding $Tenant 'ConditionalAccess' "$($expected.DisplayName) / exclusions" 'no new exclusions' `
             $(if ($newExclusions) { "$($newExclusions.Count) new: $($newExclusions -join ', ')" } else { 'none' }) $sev))
     }
-    foreach ($unexpected in ($livePolicies | Where-Object DisplayName -notin $baseline.conditionalAccess.DisplayName)) {
+    foreach ($unexpected in ($livePolicies | Where-Object { $_.DisplayName -notin $baselineNames })) {
         $findings.Add((New-DriftFinding $Tenant 'ConditionalAccess' "$($unexpected.DisplayName) / exists" 'not in baseline' 'present (review & re-baseline)' 'Info'))
     }
 
@@ -224,19 +320,33 @@ function Compare-DriftBaseline {
         @{ Setting = 'allowInvitesFrom'; Expected = $baseline.sharing.AllowInvitesFrom; Actual = $sharing.AllowInvitesFrom; Scale = $inviteScale; Sev = 'Warning' }
         @{ Setting = 'sharePointSharingCapability'; Expected = $baseline.sharing.SharePointSharingCapability; Actual = $sharing.SharePointSharingCapability; Scale = $sharingScale; Sev = 'Critical' }
     )) {
-        $drifted = $check.Scale.IndexOf([string]$check.Actual) -gt $check.Scale.IndexOf([string]$check.Expected)
+        if ([string]$check.Actual -eq 'unavailable') {
+            $findings.Add((New-DriftFinding $Tenant 'Sharing' $check.Setting $check.Expected 'unavailable on this tenant' 'Info'))
+            continue
+        }
+        # Case-insensitive index lookup — Graph enum casing varies by tenant.
+        $lowerScale = $check.Scale | ForEach-Object { $_.ToLower() }
+        $drifted = $lowerScale.IndexOf([string]$check.Actual.ToLower()) -gt $lowerScale.IndexOf([string]$check.Expected.ToLower())
         $findings.Add((New-DriftFinding $Tenant 'Sharing' $check.Setting $check.Expected $check.Actual $(if ($drifted) { $check.Sev } else { 'Ok' })))
     }
 
     # --- MFA coverage --------------------------------------------------------
     $mfa = Get-DriftMfaCoverage
-    $sev = if ($mfa.MfaRegisteredPercent -ge $baseline.mfaFloorPercent) { 'Ok' } else { 'Warning' }
-    $findings.Add((New-DriftFinding $Tenant 'MFA' 'mfaRegisteredPercent' ">= $($baseline.mfaFloorPercent)%" "$($mfa.MfaRegisteredPercent)%" $sev))
+    if ($mfa.LicenseError) {
+        $findings.Add((New-DriftFinding $Tenant 'MFA' 'mfaRegisteredPercent' ">= $($baseline.mfaFloorPercent)%" 'unavailable (Entra P1/P2 required)' 'Info'))
+    } else {
+        $sev = if ($mfa.MfaRegisteredPercent -ge $baseline.mfaFloorPercent) { 'Ok' } else { 'Warning' }
+        $findings.Add((New-DriftFinding $Tenant 'MFA' 'mfaRegisteredPercent' ">= $($baseline.mfaFloorPercent)%" "$($mfa.MfaRegisteredPercent)%" $sev))
+    }
 
     # --- Secure Score --------------------------------------------------------
     $score = Get-DriftSecureScore
-    $sev = if ($score.Percent -ge $baseline.secureScoreFloorPercent) { 'Ok' } else { 'Warning' }
-    $findings.Add((New-DriftFinding $Tenant 'SecureScore' 'secureScorePercent' ">= $($baseline.secureScoreFloorPercent)%" "$($score.Percent)%" $sev))
+    if ($score.Unavailable) {
+        $findings.Add((New-DriftFinding $Tenant 'SecureScore' 'secureScorePercent' ">= $($baseline.secureScoreFloorPercent)%" 'unavailable on this tenant' 'Info'))
+    } else {
+        $sev = if ($score.Percent -ge $baseline.secureScoreFloorPercent) { 'Ok' } else { 'Warning' }
+        $findings.Add((New-DriftFinding $Tenant 'SecureScore' 'secureScorePercent' ">= $($baseline.secureScoreFloorPercent)%" "$($score.Percent)%" $sev))
+    }
 
     $findings
 }

@@ -1,8 +1,11 @@
 name: Scheduled drift scan
 
 on:
-  schedule:
-    - cron: '0 19 * * *'   # 05:00 AEST daily
+  # Manual-only by default. To enable the daily schedule, uncomment the cron
+  # below and add the AUTH_CERT_PFX_B64 / AUTH_CERT_PASSWORD / TENANTS_JSON
+  # repository secrets (see docs/github-actions-setup.md).
+  # schedule:
+  #   - cron: '0 19 * * *'   # 05:00 AEST daily
   workflow_dispatch:
 
 jobs:
@@ -24,7 +27,8 @@ jobs:
           $pfx = Join-Path $env:RUNNER_TEMP 'auth.pfx'
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:AUTH_CERT_PFX_B64))
           Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My `
-            -Password (ConvertTo-SecureString $env:AUTH_CERT_PASSWORD -AsPlainText -Force)
+            -Password (ConvertTo-SecureString $env:AUTH_CERT_PASSWORD -AsPlainText -Force) |
+            Out-Null
           Remove-Item $pfx
 
       - name: Materialise tenant config
